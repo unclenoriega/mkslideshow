@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+
+TMPDIR=`mktemp -d`
+PHOTODIR=.
+OUTPUT=slideshow.mp4
+OVERWRITE=''
+FRAMERATE='1/5'
+OUTPUT_FRAMERATE=29.97
+RESOLUTION=1920x1080
+BACKGROUND=Black
+PLAY="false"
+AUDIO_CODEC=none
+AUDIO_TRACK=''
+LOOP_AUDIO=0
+
+Help()
+{
+   # Display Help
+   echo "Usage:"
+   echo "mkslideshow [OPTIONS]..."
+   echo "Options:"
+   echo -e "-d\tSpecify a directory of photos to use (defaults to current directory)"
+   echo -e "-h\tPrint this help and exit"
+   echo -e "-o\tSpecify output file (defaults to slideshow.mp4)"
+   echo -e "-p\tPlay the created video after completion."
+   echo -e "-s\tNumber of seconds to display each image (default 5)"
+   echo -e "-r\tOutput framerate (defaults to 29.97 for NTSC)"
+   echo -e "-q\tSet desired resoultion as WidthxHeight (default is 1920x1080)"
+   echo -e "-b\tSet background color for resized images (default is Black; see https://imagemagick.org/script/color.php for options)"
+   echo -e "-a\tSpecify audio track to use"
+   echo -e "-l\tLoop audio to fit slideshow"
+   echo
+}
+
+# Get the options
+while getopts "lyhpb:d:o:q:r:s:a:" option; do
+	case $option in
+		a) # use audio
+			AUDIO_TRACK=${OPTARG}
+			if [ ! -r "${AUDIO_TRACK}" ]; then 
+				echo "Error: Coudn't read provided audio track."
+				exit 2
+			fi
+			if [ $(ffprobe -loglevel quiet -select_streams a:0 -show_entries stream=codec_name -of default=nw=1:nk=1 "${AUDIO_TRACK}") = "aac" ]; then
+				AUDIO_CODEC=copy
+			else 
+				AUDIO_CODEC=aac
+			fi;;
+		b) # background color (imagemagick)
+			BACKGROUND=${OPTARG};;
+		d) # Specify source photo directory
+			PHOTODIR=${OPTARG}
+			if  [ ! -d "${PHOTODIR}" ]; then 
+				echo "Specified directory does not exist."
+				exit 2
+			fi;;
+		h) # display Help
+			Help
+			exit;;
+		l) # Loop audio?
+			LOOP_AUDIO="-1";;
+		o) # output file
+			OUTPUT=${OPTARG};;
+		p) # play file after
+			PLAY="true";;
+		q) #set resolution
+			RESOLUTION=${OPTARG};;
+		r) # output framerate
+			OUTPUT_FRAMERATE=${OPTARG};;
+		s) # seconds per photo (inverse for ffmpeg input framerate)
+			FRAMERATE="1/${OPTARG}";;
+		y) # if set to overwrite output file, add -y to ffmpeg command
+			OVERWRITE='-y ';;
+		\?) # Invalid option
+			echo "Error: Invalid option"
+			exit 22;;
+	esac
+done
+
+if [ -x `which convert` ] && [ -x `which ffmpeg` ]; then
+	echo "Preparing images..."
+	pushd "${PHOTODIR}"
+	for i in *; do 
+		if [[ "`file -ib "${i}"`" =~ .*image/.* ]]; then
+			convert "${i}" -auto-orient -resize ${RESOLUTION} -background ${BACKGROUND} -gravity center -extent ${RESOLUTION} "${TMPDIR}/${i}.jpg"
+			echo -n "."
+		fi
+	done
+	popd
+	echo ""
+	echo "Creating video..."
+	if [ ${AUDIO_CODEC} = "none" ]; then
+		cat ${TMPDIR}/*.jpg | ffmpeg -framerate ${FRAMERATE} -f image2pipe -i - -c:v libx264 -c:a none -vf format=yuv420p -r ${OUTPUT_FRAMERATE} ${OVERWRITE}${OUTPUT}
+	else
+		cat ${TMPDIR}/*.jpg | ffmpeg -framerate ${FRAMERATE} -f image2pipe -i - -stream_loop ${LOOP_AUDIO} -i "${AUDIO_TRACK}" -map 0:v:0 -map 1:a:0 -c:v libx264 -c:a ${AUDIO_CODEC} -b:a 160k -vf format=yuv420p -r ${OUTPUT_FRAMERATE} -shortest ${OVERWRITE}${OUTPUT}
+	fi
+	echo "Done."
+	rm -rf "${TMPDIR}"
+else
+	echo "mkslideshow requires ImageMagick and FFMpeg and couldn't find them. Are they installed and in your PATH?"
+	exit 2
+fi
+if [ ${PLAY} = "true" ]; then
+	xdg-open "${OUTPUT}"
+fi
+exit
+
+## FFMpeg arguments:
+##	Input:
+##		-framerate 1/5		: display each input image for 5 seconds (inverse of framerate)
+##		-f image2pipe		: specify format as piped images
+##		-i - 				: set input to pipe (from cat in this case)
+##	Output:
+##		-c:v libx264		: set video codec to libx264
+##		-c:a none			: no audio
+##		-vf format=yuv420p	: use Y'UV420p format for compatibility reasons*
+##		-start_number 112   : this used to be here. I don't think it did anything
+##		-r 29.97			: use 29.97 fps (for NTSC; may want to change otherwise)
+##		-shortest			: stop after shortest stream (if audio is looped, video stream is automatically shorter)
+##		-y					: clobber output file
+
+# *"By default when using libx264, and depending on your input, ffmpeg will attempt to avoid color subsampling. Technically this is preferred, but unfortunately almost all video players, excluding FFmpeg based players, and many online video services only support the YUV color space with 4:2:0 chroma subsampling. Using the options -pix_fmt yuv420p or -vf format=yuv420p will maximize compatibility." 
